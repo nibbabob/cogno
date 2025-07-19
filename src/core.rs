@@ -57,7 +57,8 @@ impl Default for AffectiveConfig {
         AffectiveConfig {
             baseline_state: AffectiveState::new_neutral(),
             decay_rate: 0.15, // A slightly faster decay
-            empathy_factor: 0.5, // Moderately empathetic
+            // FIX: Increased empathy for a more expressive response
+            empathy_factor: 0.8, 
         }
     }
 }
@@ -161,10 +162,11 @@ impl AffectiveCore {
     }
 
     /// Synthesizes a feeling description from the VADN state.
+    // FIX: Lowered thresholds to make the synthesis more sensitive to state changes.
     fn synthesize_feeling(&self, v: f64, a: f64, d: f64) -> String {
-        if v > 0.5 && a > 0.5 { "elated and energetic".to_string() }
-        else if v > 0.5 { "pleased and content".to_string() }
-        else if v < -0.5 && a > 0.6 {
+        if v > 0.4 && a > 0.45 { "elated and proud".to_string() }
+        else if v > 0.4 { "pleased and content".to_string() }
+        else if v < -0.5 && a > 0.5 {
             if d > 0.4 { "indignant and assertive".to_string() }
             else { "anxious and distressed".to_string() }
         }
@@ -172,8 +174,8 @@ impl AffectiveCore {
             if d < -0.4 { "dejected and powerless".to_string() }
             else { "somber and disappointed".to_string() }
         }
-        else if a > 0.7 { "highly alert and focused".to_string() }
-        else if a < 0.2 { "calm and relaxed".to_string() }
+        else if a > 0.6 { "alert and focused".to_string() }
+        else if a < 0.25 { "calm and relaxed".to_string() }
         else { "calmly neutral".to_string() }
     }
 }
@@ -186,7 +188,7 @@ impl Default for AffectiveCore {
 }
 
 // --- Private Helper Functions for Prompt Generation ---
-
+// No changes needed here
 fn describe_valence(v: f64) -> &'static str {
     if v > 0.7 { "very positive" } else if v > 0.3 { "positive" }
     else if v < -0.7 { "very negative" } else if v < -0.3 { "negative" }

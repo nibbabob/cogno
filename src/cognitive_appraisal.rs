@@ -1,12 +1,13 @@
 //! cognitive_appraisal.rs
 //!
-//! Defines emotions based on the OCC (Ortony, Clore, Collins) model.
-//! These are the structured emotional categories we'll ask the LLM to identify.
+//! Defines emotions based on the OCC (Ortony, Clore, Collins) model
+//! and provides functionality for appraising emotions from text.
 
 use serde::Deserialize;
+use crate::llm_api;
 
-/// Represents discrete emotions from the OCC model, deserializable from LLM output.
-#[allow(dead_code)] 
+// ... (No changes to the OccEmotion enum)
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "emotion", content = "details", rename_all = "PascalCase")]
 pub enum OccEmotion {
@@ -75,5 +76,19 @@ pub enum OccEmotion {
 impl Default for OccEmotion {
     fn default() -> Self {
         OccEmotion::Neutral
+    }
+}
+
+
+/// Appraises the emotion from a user's prompt by calling the LLM.
+pub async fn appraise_emotion_from_prompt(user_prompt: &str) -> OccEmotion {
+    // FIX: Instead of unwrap_or_default(), we now handle the result properly.
+    match llm_api::call_llm_for_appraisal(user_prompt).await {
+        Ok(emotion) => emotion,
+        Err(e) => {
+            // This will print a detailed error if the API call or parsing fails.
+            eprintln!("🔥 Appraisal Error: {}. Falling back to Neutral.", e);
+            OccEmotion::default()
+        }
     }
 }
