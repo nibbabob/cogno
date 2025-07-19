@@ -1,47 +1,74 @@
 //! main.rs
 //!
-//! Main application entry point.
-//! This simulates the full middleware loop.
+//! Main application entry point. Simulates a conversation and self-reflection.
 
-// Declare the modules
 mod core;
 mod cognitive_appraisal;
 mod llm_api;
+mod memory;
 
 use crate::core::AffectiveCore;
 use crate::cognitive_appraisal::appraise_emotion_from_prompt;
 
+async fn run_conversational_turn(core: &mut AffectiveCore, user_prompt: &str) {
+    println!("\n------------------------------------------------------");
+    core.memory.interaction_count += 1;
+    println!("Turn {}: User says: \"{}\"", core.memory.interaction_count, user_prompt);
+
+    core.memory.learn_from_prompt(user_prompt);
+
+    match appraise_emotion_from_prompt(user_prompt, &core.memory).await {
+        Ok(parsed_emotion) => {
+            println!("✅ LLM Appraised Emotion: {:?}", parsed_emotion);
+            core.process_emotion(&parsed_emotion);
+        }
+        Err(_) => {
+            println!("Could not process emotion. State remains unchanged.");
+        }
+    }
+    
+    // The core always regulates back towards its (potentially new) baseline personality
+    core.regulate_emotion();
+
+    println!("✨ Core Personality: {:?}", core.memory.personality);
+    println!("⏳ Final State (after decay): {:?}", core.current_state());
+    println!("\n📝 Generated Instructional Microprompt for Gemini:");
+    println!("{}", core.get_instructional_prompt_text());
+    println!("------------------------------------------------------");
+}
+
 #[tokio::main]
 async fn main() {
-    println!("🚀 Starting Emotional Middleware Simulation...");
+    println!("🚀 Starting Sentient AI Simulation...");
 
-    // 1. Initialize the Affective Core
     let mut affective_core = AffectiveCore::default();
-    println!("🧠 Initial State: {:?}", affective_core.current_state());
+    println!("🧠 Initial Personality: {:?}", affective_core.memory.personality);
 
-    // --- SIMULATION OF A CONVERSATIONAL TURN ---
+    // --- SIMULATION OF A CONVERSATION ---
 
-    // 2. Simulate User Input
-    let user_prompt = "Wow, I can't believe I got the promotion. I worked so hard for this!";
-    println!("\nUser says: \"{}\"", user_prompt);
+    run_conversational_turn(
+        &mut affective_core,
+        "Wow, I can't believe I got the promotion. My name is Alex. I worked so hard for this!"
+    ).await;
 
-    // 3. Appraise the emotion from the user's prompt
-    let parsed_emotion = appraise_emotion_from_prompt(user_prompt).await;
-    println!("✅ LLM Appraised Emotion: {:?}", parsed_emotion);
+    run_conversational_turn(
+        &mut affective_core,
+        "This is amazing. I just closed the biggest deal of my career on my first day in the new role!"
+    ).await;
+    
+    run_conversational_turn(
+        &mut affective_core,
+        "The whole team gave me a round of applause. I feel like I'm on top of the world."
+    ).await;
 
-    // 4. Process the emotion and update the core state
-    affective_core.process_emotion(&parsed_emotion);
-    println!("✨ State after processing emotion: {:?}", affective_core.current_state());
-
-    // 5. Apply emotional regulation (decay toward baseline)
-    affective_core.regulate_emotion();
-    println!("⏳ State after regulation/decay: {:?}", affective_core.current_state());
-    println!("📜 Emotional History: {:?}", affective_core.history());
-
-    // --- DEMONSTRATE FINAL OUTPUT ---
-
-    // 6. Generate the instructional prompt for the LLM's final response.
-    println!("\n📝 Generated Instructional Microprompt for Gemini:");
-    let instructional_prompt = affective_core.get_instructional_prompt_text();
-    println!("{}", instructional_prompt);
+    // --- TRIGGER SELF-REFLECTION ---
+    // After a series of positive events, the AI reflects on its experience.
+    affective_core.reflect().await;
+    
+    // --- CONTINUE THE CONVERSATION WITH THE NEW PERSONALITY ---
+    
+    run_conversational_turn(
+        &mut affective_core,
+        "Okay, time to focus. I have a new project brief, and it looks pretty challenging."
+    ).await;
 }

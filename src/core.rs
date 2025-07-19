@@ -1,40 +1,38 @@
 //! Core Module
 //!
-//! Manages the underlying emotional state using dimensional models of affect.
-//! Based on research in affective computing and psychological theories of emotion.
+//! Manages the underlying emotional state and self-reflection.
 
-// No changes needed for AffectiveState
-#[derive(Debug, Clone, Copy, Default)]
+use crate::cognitive_appraisal::{AppraisedEmotion, AffectiveStateChange};
+use crate::llm_api;
+use crate::memory::Memory;
+
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
 pub struct AffectiveState {
-    /// Pleasure-displeasure: how positive/negative the experience is (-1.0 to 1.0)
     pub valence: f64,
-    /// Activation-deactivation: how energized/calm the experience is (0.0 to 1.0)
     pub arousal: f64,
-    /// Control-submission: how much agency/power is felt (-1.0 to 1.0)
     pub dominance: f64,
-    /// Familiarity-novelty: how expected/surprising the situation is (-1.0 to 1.0)
     pub novelty: f64,
 }
 
+// ... (AffectiveState impl is unchanged) ...
 impl AffectiveState {
     pub fn new_neutral() -> Self {
         AffectiveState {
             valence: 0.0,
-            arousal: 0.3,   // Slightly alert
-            dominance: 0.1,  // Slightly confident
-            novelty: 0.0,    // Neutral familiarity
+            arousal: 0.3,
+            dominance: 0.1,
+            novelty: 0.0,
         }
     }
 
     /// Internal method to apply changes and clamp values
-    fn apply_change(&mut self, change: AffectiveState) {
+    fn apply_change(&mut self, change: AffectiveStateChange) { // UPDATED to take AffectiveStateChange
         self.valence = (self.valence + change.valence).clamp(-1.0, 1.0);
         self.arousal = (self.arousal + change.arousal).clamp(0.0, 1.0);
         self.dominance = (self.dominance + change.dominance).clamp(-1.0, 1.0);
         self.novelty = (self.novelty + change.novelty).clamp(-1.0, 1.0);
     }
     
-    /// Internal method for state decay
     fn decay(&mut self, baseline: AffectiveState, rate: f64) {
         let rate = rate.clamp(0.0, 1.0);
         self.valence += (baseline.valence - self.valence) * rate;
@@ -44,73 +42,79 @@ impl AffectiveState {
     }
 }
 
-// NEW: Configuration for personality and behavior
-#[derive(Debug, Clone, Copy)]
-pub struct AffectiveConfig {
-    pub baseline_state: AffectiveState,
-    pub decay_rate: f64,
-    pub empathy_factor: f64, // How much the AI is influenced by the user's emotion (0.0 to 1.0)
-}
 
-impl Default for AffectiveConfig {
-    fn default() -> Self {
-        AffectiveConfig {
-            baseline_state: AffectiveState::new_neutral(),
-            decay_rate: 0.15, // A slightly faster decay
-            // FIX: Increased empathy for a more expressive response
-            empathy_factor: 0.8, 
-        }
-    }
-}
-
-// UPDATED: AffectiveCore now uses the config and has private fields
 pub struct AffectiveCore {
     current_state: AffectiveState,
-    config: AffectiveConfig,
-    emotional_history: Vec<String>,
+    pub memory: Memory,
+    decay_rate: f64,
+    empathy_factor: f64,
 }
 
 impl AffectiveCore {
-    /// Creates a new AffectiveCore with a given configuration.
-    pub fn new(config: AffectiveConfig) -> Self {
+    /// Creates a new AffectiveCore, initializing state from its memory's personality.
+    pub fn new() -> Self {
+        let memory = Memory::new();
         AffectiveCore {
-            current_state: config.baseline_state,
-            config,
-            emotional_history: Vec::new(),
+            current_state: memory.personality.baseline_state,
+            memory,
+            decay_rate: 0.15,
+            empathy_factor: 0.8,
         }
     }
 
-    // --- Public API ---
-
+    // --- ADD THIS METHOD BACK ---
+    /// Returns a copy of the current affective state.
+    pub fn current_state(&self) -> AffectiveState {
+        self.current_state
+    }
+    
     /// Processes an appraised emotion, updating the internal state.
-    pub fn process_emotion(&mut self, emotion: &crate::cognitive_appraisal::OccEmotion) {
-        // 1. Get the raw emotional change from the stimulus
-        let change = self.emotion_to_affective_change(emotion);
-
-        // 2. Apply empathy model: blend the change with the current state
-        let empathy = self.config.empathy_factor;
-        let blended_change = AffectiveState {
-            valence: change.valence * empathy,
-            arousal: change.arousal * empathy,
-            dominance: change.dominance * empathy,
-            novelty: change.novelty * empathy,
+    pub fn process_emotion(&mut self, emotion: &AppraisedEmotion) {
+        let change = emotion.vadn;
+        let blended_change = AffectiveStateChange {
+            valence: change.valence * self.empathy_factor,
+            arousal: change.arousal * self.empathy_factor,
+            dominance: change.dominance * self.empathy_factor,
+            novelty: change.novelty * self.empathy_factor,
         };
         self.current_state.apply_change(blended_change);
 
-        // 3. Track history
-        let full_emotion_details = format!("{:?}", emotion);
-        self.emotional_history.push(full_emotion_details);
-        if self.emotional_history.len() > 10 {
-            self.emotional_history.remove(0);
+        let full_emotion_details = format!(
+            "Emotion: '{}', VADN: {:?}, Details: {}",
+            emotion.emotion,
+            emotion.vadn,
+            emotion.details.to_string()
+        );
+        
+        if emotion.vadn.valence.abs() > 0.6 || emotion.vadn.arousal > 0.7 {
+            self.memory.record_milestone(full_emotion_details);
         }
     }
 
-    /// Applies emotional regulation, decaying the state toward its baseline.
+    /// Applies emotional regulation, decaying the state toward its personality's baseline.
     pub fn regulate_emotion(&mut self) {
-        self.current_state.decay(self.config.baseline_state, self.config.decay_rate);
+        let baseline = self.memory.personality.baseline_state;
+        self.current_state.decay(baseline, self.decay_rate);
+    }
+    
+    /// Triggers the self-reflection process.
+    pub async fn reflect(&mut self) {
+        println!("\n--- SELF-REFLECTION TRIGGERED ---");
+        match llm_api::call_llm_for_reflection(&self.memory).await {
+            Ok(new_personality) => {
+                println!("💡 Reflection successful. Personality has been updated.");
+                println!("Old personality: {:?}", self.memory.personality);
+                println!("New personality: {:?}", new_personality);
+                self.memory.personality = new_personality;
+            }
+            Err(e) => {
+                eprintln!("🔥 Reflection Error: {}", e);
+            }
+        }
+        println!("--- SELF-REFLECTION COMPLETE ---\n");
     }
 
-    /// **NEW**: Generates the text for the VADN-Aware Instructional Microprompt.
+    // ... (rest of the file is unchanged) ...
     pub fn get_instructional_prompt_text(&self) -> String {
         let v = self.current_state.valence;
         let a = self.current_state.arousal;
@@ -135,34 +139,7 @@ impl AffectiveCore {
             summary
         )
     }
-
-    // --- Getters for state observation ---
-    pub fn current_state(&self) -> AffectiveState { self.current_state }
-    pub fn history(&self) -> &Vec<String> { &self.emotional_history }
-
-    // --- Internal Logic ---
-
-    /// Maps discrete emotions to VADN state changes. (Unchanged from your version)
-    fn emotion_to_affective_change(&self, emotion: &crate::cognitive_appraisal::OccEmotion) -> AffectiveState {
-        use crate::cognitive_appraisal::OccEmotion::*;
-        match emotion {
-            Joy { intensity, .. } => AffectiveState { valence: 0.6 * intensity, arousal: 0.4 * intensity, dominance: 0.2 * intensity, novelty: 0.1 * intensity },
-            Pride { intensity, .. } => AffectiveState { valence: 0.7 * intensity, arousal: 0.3 * intensity, dominance: 0.8 * intensity, novelty: -0.1 },
-            Gratitude { intensity, .. } => AffectiveState { valence: 0.8 * intensity, arousal: 0.2 * intensity, dominance: -0.3 * intensity, novelty: 0.2 },
-            Satisfaction { .. } => AffectiveState { valence: 0.6, arousal: -0.2, dominance: 0.4, novelty: -0.3 },
-            Relief { .. } => AffectiveState { valence: 0.5, arousal: -0.5, dominance: 0.2, novelty: 0.0 },
-            Distress { intensity, .. } => AffectiveState { valence: -0.6 * intensity, arousal: 0.4 * intensity, dominance: -0.3 * intensity, novelty: 0.1 },
-            Fear { likelihood, .. } => AffectiveState { valence: -0.7 * likelihood, arousal: 0.8 * likelihood, dominance: -0.8 * likelihood, novelty: 0.6 * likelihood },
-            Anger { intensity, .. } => AffectiveState { valence: -0.6 * intensity, arousal: 0.7 * intensity, dominance: 0.6 * intensity, novelty: 0.2 },
-            Shame { intensity, .. } => AffectiveState { valence: -0.8 * intensity, arousal: 0.2 * intensity, dominance: -0.9 * intensity, novelty: 0.0 },
-            Disappointment { .. } => AffectiveState { valence: -0.5, arousal: -0.3, dominance: -0.4, novelty: -0.2 },
-            Hope { likelihood, .. } => AffectiveState { valence: 0.4 * likelihood, arousal: 0.3 * likelihood, dominance: 0.1, novelty: 0.2 },
-            _ => AffectiveState::default(),
-        }
-    }
-
-    /// Synthesizes a feeling description from the VADN state.
-    // FIX: Lowered thresholds to make the synthesis more sensitive to state changes.
+    
     fn synthesize_feeling(&self, v: f64, a: f64, d: f64) -> String {
         if v > 0.4 && a > 0.45 { "elated and proud".to_string() }
         else if v > 0.4 { "pleased and content".to_string() }
@@ -180,15 +157,13 @@ impl AffectiveCore {
     }
 }
 
-// Default implementation for easy setup
+// ... (Default impl and helper functions are unchanged) ...
 impl Default for AffectiveCore {
     fn default() -> Self {
-        AffectiveCore::new(AffectiveConfig::default())
+        AffectiveCore::new()
     }
 }
 
-// --- Private Helper Functions for Prompt Generation ---
-// No changes needed here
 fn describe_valence(v: f64) -> &'static str {
     if v > 0.7 { "very positive" } else if v > 0.3 { "positive" }
     else if v < -0.7 { "very negative" } else if v < -0.3 { "negative" }
