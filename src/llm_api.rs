@@ -1,278 +1,479 @@
 //! llm_api.rs
 //!
-//! Interacts with an external LLM for cognitive appraisal and self-reflection.
-//! Updated to use the recommended API key header and generationConfig for JSON output.
+//! Enhanced LLM API with robust error handling, retry mechanisms, and proper async patterns.
 
 use crate::cognitive_appraisal::AppraisedEmotion;
-use crate::memory::{Memory, Personality}; // Import Personality
-use reqwest::{header, Client};
+use crate::memory::{Memory, Personality};
+use reqwest::Client;
 use serde_json::Value;
 use std::env;
 use std::time::Duration;
+use tokio::time::timeout;
+use std::sync::{ OnceLock};
+use thiserror::Error;
 
-// --- Constants for Configuration ---
-const API_BASE_URL: &str = "[https://generativelanguage.googleapis.com/v1beta/models/](https://generativelanguage.googleapis.com/v1beta/models/)";
-const MODEL_NAME: &str = "gemini-1.5-pro"; // Using a more capable model
 
-/// **MODIFIED**: Creates a configured HTTP client.
-/// It now reads the API key and sets it as a default header (`x-goog-api-key`)
-/// for all requests made with this client. This is the modern, recommended approach.
-fn create_http_client() -> Result<Client, Box<dyn std::error::Error>> {
-    let api_key = env::var("GEMINI_API_KEY").map_err(|_| "GEMINI_API_KEY environment variable not set")?;
-
-    let mut headers = header::HeaderMap::new();
-    // Create a HeaderValue from the API key.
-    let mut auth_value = header::HeaderValue::from_str(&api_key)?;
-    // Mark the header as sensitive to prevent it from being logged.
-    auth_value.set_sensitive(true);
-    // Insert the `x-goog-api-key` header.
-    headers.insert("x-goog-api-key", auth_value);
-
-    let client = Client::builder()
-        .timeout(Duration::from_secs(30))
-        .connect_timeout(Duration::from_secs(10))
-        .default_headers(headers) // Set the default headers for the client
-        .build()?;
-
-    Ok(client)
+/// Custom error types for LLM API operations
+#[derive(Error, Debug)]
+pub enum LlmApiError {
+    #[error("API key not found in environment")]
+    ApiKeyMissing,
+    
+    #[error("Network request failed: {0}")]
+    NetworkError(#[from] reqwest::Error),
+    
+    #[error("Request timeout after {seconds}s")]
+    Timeout { seconds: u64 },
+    
+    #[error("HTTP error: {status} - {message}")]
+    HttpError { status: u16, message: String },
+    
+    #[error("JSON parsing failed: {reason}")]
+    JsonParseError { reason: String },
+    
+    #[error("Invalid API response structure: {details}")]
+    InvalidResponseStructure { details: String },
+    
+    #[error("LLM returned empty response")]
+    EmptyResponse,
+    
+    #[error("API rate limit exceeded")]
+    RateLimitExceeded,
+    
+    #[error("Serialization error: {0}")]
+    SerializationError(#[from] serde_json::Error),
+    
+    #[error("Maximum retry attempts ({attempts}) exceeded")]
+    MaxRetriesExceeded { attempts: u32 },
+    
+    #[error("Invalid emotion mapping: {details}")]
+    InvalidEmotionMapping { details: String },
 }
 
-/// Test the API connection with a simple request.
-pub async fn test_api_connection() -> Result<(), Box<dyn std::error::Error>> {
-    println!("🔍 Testing API connection...");
+/// Configuration for LLM API requests
+#[derive(Debug, Clone)]
+pub struct LlmApiConfig {
+    pub timeout_seconds: u64,
+    pub max_retries: u32,
+    pub retry_delay_ms: u64,
+    pub rate_limit_delay_ms: u64,
+}
 
-    // **MODIFIED**: The API URL no longer contains the key.
-    let api_url = format!("{}{}:generateContent", API_BASE_URL, MODEL_NAME);
-
-    // **MODIFIED**: The client is now created with the auth header built-in.
-    let client = create_http_client()?;
-
-    let test_request = serde_json::json!({
-        "contents": [{
-            "parts": [{
-                "text": "Test connection. Respond with just 'OK'."
-            }]
-        }]
-    });
-
-    let response = client
-        .post(&api_url)
-        .header(header::CONTENT_TYPE, "application/json") // Explicitly set content type
-        .json(&test_request)
-        .send()
-        .await?;
-
-    if response.status().is_success() {
-        println!("✅ API connection successful");
-        Ok(())
-    } else {
-        let status = response.status();
-        let error_body = response.text().await.unwrap_or_else(|_| "Unable to read error body".to_string());
-        Err(format!("API test failed. Status: {}. Body: {}", status, error_body).into())
+impl Default for LlmApiConfig {
+    fn default() -> Self {
+        LlmApiConfig {
+            timeout_seconds: 30,
+            max_retries: 3,
+            retry_delay_ms: 1000,
+            rate_limit_delay_ms: 5000,
+        }
     }
 }
 
-pub async fn call_llm_for_appraisal(user_prompt: &str, memory: &Memory) -> Result<AppraisedEmotion, Box<dyn std::error::Error>> {
-    println!("📞 Calling LLM API for cognitive appraisal...");
+/// Enhanced LLM API client with robust error handling
+pub struct LlmApiClient {
+    client: Client,
+    config: LlmApiConfig,
+    api_key: String,
+}
 
-    // **MODIFIED**: The API URL is cleaner and no longer contains the key.
-    let api_url = format!("{}{}:generateContent", API_BASE_URL, MODEL_NAME);
+impl LlmApiClient {
+    /// Create a new LLM API client
+    pub fn new(config: Option<LlmApiConfig>) -> Result<Self, LlmApiError> {
+        let api_key = env::var("GEMINI_API_KEY")
+            .map_err(|_| LlmApiError::ApiKeyMissing)?;
+        
+        let client = Client::builder()
+            .timeout(Duration::from_secs(60)) // Overall client timeout
+            .build()
+            .map_err(LlmApiError::NetworkError)?;
+        
+        Ok(LlmApiClient {
+            client,
+            config: config.unwrap_or_default(),
+            api_key,
+        })
+    }
 
-    // **MODIFIED**: The client handles authentication automatically via default headers.
-    let client = create_http_client()?;
-    let memory_context = serde_json::to_string(memory).unwrap_or_else(|_| "{}".to_string());
+    /// Call LLM for cognitive appraisal with enhanced error handling
+    pub async fn call_for_appraisal(&self, user_prompt: &str, memory: &Memory) -> Result<AppraisedEmotion, LlmApiError> {
+        println!("📞 Calling LLM API for cognitive appraisal...");
+        
+        let memory_context = serde_json::to_string(memory)
+            .map_err(LlmApiError::SerializationError)?;
 
-    let prompt_text = format!(
-        r#"Analyze the emotional content of this user message and respond with JSON only.
-
-User message: "{}"
-
-Memory context: {}
-
-Respond with this exact JSON structure:
-{{
-  "emotion": "happiness",
-  "vadn": {{"valence": 0.7, "arousal": 0.5, "dominance": 0.3, "novelty": 0.2}},
-  "details": {{"focus": "user seems happy", "reason": "positive language detected"}}
-}}
-
-Values should be between -1.0 and 1.0 for valence/dominance/novelty, and 0.0 to 1.0 for arousal.
-Respond ONLY with valid JSON, no other text."#,
-        user_prompt, memory_context
-    );
-
-    println!("🔄 Sending request to API...");
-
-    // **MODIFIED**: Added `generationConfig` to request a JSON response directly.
-    // This makes parsing much more reliable.
-    let request_body = serde_json::json!({
-        "contents": [{
-            "parts": [{
-                "text": prompt_text
-            }]
-        }],
-        "generationConfig": {
-            "response_mime_type": "application/json"
+        let prompt_text = self.build_appraisal_prompt(&memory_context, user_prompt);
+        let request_body = self.build_request_body(&prompt_text)?;
+        
+        for attempt in 1..=self.config.max_retries {
+            match self.execute_request_with_timeout(&request_body).await {
+                Ok(response) => {
+                    match self.parse_appraisal_response(response).await {
+                        Ok(emotion) => {
+                            println!("✅ Successfully parsed emotion: {:?}", emotion.emotion);
+                            return Ok(emotion);
+                        }
+                        Err(e) if attempt < self.config.max_retries => {
+                            println!("⚠️ Parsing failed on attempt {}: {:?}. Retrying...", attempt, e);
+                            self.wait_before_retry().await;
+                            continue;
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+                Err(LlmApiError::RateLimitExceeded) if attempt < self.config.max_retries => {
+                    println!("⏳ Rate limit hit on attempt {}. Waiting longer...", attempt);
+                    tokio::time::sleep(Duration::from_millis(self.config.rate_limit_delay_ms)).await;
+                    continue;
+                }
+                Err(e) if attempt < self.config.max_retries && self.is_retryable_error(&e) => {
+                    println!("🔄 Retryable error on attempt {}: {:?}. Retrying...", attempt, e);
+                    self.wait_before_retry().await;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
         }
-    });
+        
+        Err(LlmApiError::MaxRetriesExceeded { 
+            attempts: self.config.max_retries 
+        })
+    }
 
-    let response = match client
-        .post(&api_url)
-        .header(header::CONTENT_TYPE, "application/json")
-        .json(&request_body)
-        .send()
-        .await {
-        Ok(resp) => resp,
-        Err(e) => {
-            return Err(format!("HTTP request failed: {}. Check your internet connection.", e).into());
+    /// Call LLM for self-reflection with enhanced error handling
+    pub async fn call_for_reflection(&self, memory: &Memory) -> Result<Personality, LlmApiError> {
+        println!("🧘‍♀️ Calling LLM API for self-reflection...");
+        
+        let memory_summary = serde_json::to_string_pretty(memory)
+            .map_err(LlmApiError::SerializationError)?;
+        
+        let prompt_text = self.build_reflection_prompt(&memory_summary);
+        let request_body = self.build_request_body(&prompt_text)?;
+        
+        for attempt in 1..=self.config.max_retries {
+            match self.execute_request_with_timeout(&request_body).await {
+                Ok(response) => {
+                    match self.parse_reflection_response(response).await {
+                        Ok(personality) => {
+                            println!("✅ Successfully updated personality");
+                            return Ok(personality);
+                        }
+                        Err(e) if attempt < self.config.max_retries => {
+                            println!("⚠️ Reflection parsing failed on attempt {}: {:?}. Retrying...", attempt, e);
+                            self.wait_before_retry().await;
+                            continue;
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+                Err(e) if attempt < self.config.max_retries && self.is_retryable_error(&e) => {
+                    println!("🔄 Retryable error on attempt {}: {:?}. Retrying...", attempt, e);
+                    self.wait_before_retry().await;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
         }
-    };
+        
+        Err(LlmApiError::MaxRetriesExceeded { 
+            attempts: self.config.max_retries 
+        })
+    }
 
-    println!("📨 Received response with status: {}", response.status());
+    /// Execute HTTP request with timeout
+    async fn execute_request_with_timeout(&self, request_body: &Value) -> Result<reqwest::Response, LlmApiError> {
+        let api_url = format!(
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={}",
+            self.api_key
+        );
 
-    if response.status().is_success() {
-        let body: Value = response.json().await?;
-        println!("📄 Raw API Response: {}", serde_json::to_string_pretty(&body)?);
+        let request_future = self.client
+            .post(&api_url)
+            .json(request_body)
+            .send();
 
-        // **MODIFIED**: The path to the text is slightly different for JSON responses.
-        // It's directly in `parts[0]`, not `parts[0].text`.
-        // We now expect the model to return a JSON object directly.
-        let json_content = body
+        let response = timeout(
+            Duration::from_secs(self.config.timeout_seconds),
+            request_future
+        )
+        .await
+        .map_err(|_| LlmApiError::Timeout { 
+            seconds: self.config.timeout_seconds 
+        })?
+        .map_err(LlmApiError::NetworkError)?;
+
+        // Check for HTTP errors
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let error_text = response.text().await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            
+            return if status == 429 {
+                Err(LlmApiError::RateLimitExceeded)
+            } else {
+                Err(LlmApiError::HttpError {
+                    status,
+                    message: error_text,
+                })
+            };
+        }
+
+        Ok(response)
+    }
+
+    /// Parse cognitive appraisal response
+    async fn parse_appraisal_response(&self, response: reqwest::Response) -> Result<AppraisedEmotion, LlmApiError> {
+        let body: Value = response.json().await
+            .map_err(|e| LlmApiError::JsonParseError { 
+                reason: format!("Failed to parse response as JSON: {}", e)
+            })?;
+
+        println!("📄 Raw API Response: {}", serde_json::to_string_pretty(&body).unwrap_or_default());
+
+        let text_content = self.extract_text_content(&body)?;
+        let cleaned_text = self.clean_json_text(&text_content)?;
+        
+        if cleaned_text.is_empty() {
+            return Err(LlmApiError::EmptyResponse);
+        }
+
+        // Parse the cleaned JSON
+        serde_json::from_str::<AppraisedEmotion>(&cleaned_text)
+            .map_err(|e| {
+                LlmApiError::InvalidEmotionMapping {
+                    details: format!("Failed to parse emotion JSON: {}. Content: '{}'", e, cleaned_text)
+                }
+            })
+    }
+
+    /// Parse self-reflection response
+    async fn parse_reflection_response(&self, response: reqwest::Response) -> Result<Personality, LlmApiError> {
+        let body: Value = response.json().await
+            .map_err(|e| LlmApiError::JsonParseError { 
+                reason: format!("Failed to parse reflection response as JSON: {}", e)
+            })?;
+
+        let text_content = self.extract_text_content(&body)?;
+        let cleaned_text = self.clean_json_text(&text_content)?;
+        
+        if cleaned_text.is_empty() {
+            return Err(LlmApiError::EmptyResponse);
+        }
+
+        serde_json::from_str::<Personality>(&cleaned_text)
+            .map_err(|e| {
+                LlmApiError::JsonParseError {
+                    reason: format!("Failed to parse personality JSON: {}. Content: '{}'", e, cleaned_text)
+                }
+            })
+    }
+
+    /// Extract text content from API response
+    fn extract_text_content(&self, body: &Value) -> Result<String, LlmApiError> {
+        let text_content = body
             .get("candidates")
             .and_then(|c| c.get(0))
             .and_then(|c| c.get("content"))
             .and_then(|p| p.get("parts"))
             .and_then(|p| p.get(0))
-            .and_then(|p| p.get("text")) // The model still wraps the JSON in the "text" field
-            .ok_or("Could not find 'text' field in the API response.")?;
+            .and_then(|p| p.get("text"))
+            .and_then(|t| t.as_str())
+            .ok_or_else(|| LlmApiError::InvalidResponseStructure {
+                details: "Expected text content not found in response".to_string()
+            })?;
 
-        // The response should be a string containing JSON.
-        let json_string = json_content.as_str().ok_or("Expected text field to be a string.")?;
-        
-        println!("📝 Extracted JSON string: {}", json_string);
+        Ok(text_content.to_string())
+    }
 
-        // We parse the string into our AppraisedEmotion struct.
-        match serde_json::from_str(json_string) {
-            Ok(emotion) => {
-                println!("✅ Successfully parsed emotion from JSON response.");
-                Ok(emotion)
-            },
-            Err(e) => {
-                println!("❌ JSON parsing failed: {}. The model did not return valid JSON despite the configuration.", e);
-                create_fallback_emotion(user_prompt)
-            }
+    /// Clean JSON text by removing markdown formatting
+    fn clean_json_text(&self, text: &str) -> Result<String, LlmApiError> {
+        let cleaned = text
+            .trim()
+            .trim_start_matches("```json")
+            .trim_start_matches("```")
+            .trim_end_matches("```")
+            .trim();
+
+        if cleaned.is_empty() {
+            return Err(LlmApiError::EmptyResponse);
         }
-    } else {
-        // Error handling remains largely the same, but updated for clarity.
-        let status = response.status();
-        let error_body = response.text().await.unwrap_or_else(|_| "Unable to read error body".to_string());
+
+        // Validate that it looks like JSON
+        if !cleaned.starts_with('{') || !cleaned.ends_with('}') {
+            return Err(LlmApiError::JsonParseError {
+                reason: format!("Content doesn't appear to be valid JSON: '{}'", cleaned)
+            });
+        }
+
+        Ok(cleaned.to_string())
+    }
+
+    /// Build request body for API calls
+    fn build_request_body(&self, prompt_text: &str) -> Result<Value, LlmApiError> {
+        Ok(serde_json::json!({
+            "contents": [{
+                "parts": [{
+                    "text": prompt_text
+                }]
+            }]
+        }))
+    }
+
+    /// Build the appraisal prompt
+    fn build_appraisal_prompt(&self, memory_context: &str, user_prompt: &str) -> String {
+        format!(
+            r#"Your task is to perform a deep cognitive appraisal of the user's text.
+1. Identify the most accurate, nuanced emotion. Do NOT be limited to a simple list. Use words like "Apprehension", "Vindication", "Nostalgia", etc., if they fit.
+2. Map that emotion to a dimensional model of affect (VADN).
+3. Respond with a single, clean JSON object.
+
+**Your Memory Context:**
+{}
+
+**VADN Dimensions:**
+- `valence`: Pleasure vs. Displeasure (-1.0 to 1.0).
+- `arousal`: Energy/Activation level (0.0 to 1.0).
+- `dominance`: Sense of control/power (-1.0 to 1.0).
+- `novelty`: Surprise/Unexpectedness (-1.0 to 1.0).
+
+**JSON Schema:**
+You MUST respond with a JSON object with three keys: "emotion" (string), "vadn" (object), and "details" (object).
+
+**Example for "Now I have to manage a whole new team. It's a bit daunting.":**
+{{
+    "emotion": "Apprehension",
+    "vadn": {{"valence": -0.2, "arousal": 0.5, "dominance": -0.3, "novelty": 0.6}},
+    "details": {{"focus": "managing a new team", "reason": "The user feels a mix of hope and fear about the new responsibility."}}
+}}
+
+**User Text:**
+"{}"
+
+Respond only with the JSON object."#,
+            memory_context, user_prompt
+        )
+    }
+
+    /// Build the reflection prompt
+    fn build_reflection_prompt(&self, memory_summary: &str) -> String {
+        format!(
+            r#"You are an AI reflecting on your recent emotional experiences to see if your core personality should evolve.
         
-        println!("❌ API request failed: Status {}", status);
-        println!("📄 Error body: {}", error_body);
-        
-        let error_msg = match status.as_u16() {
-            400 => format!("Bad request. Check the request body. Details: {}", error_body),
-            401 | 403 => "Authentication failed. Please check your GEMINI_API_KEY and its permissions.".to_string(),
-            429 => "Rate limit exceeded. Please wait and try again.".to_string(),
-            500..=599 => "Server error. The API service may be temporarily unavailable.".to_string(),
-            _ => format!("HTTP error {}: {}", status, error_body)
-        };
-        
-        Err(error_msg.into())
+Analyze your emotional milestones and current personality. Based on the patterns, decide if your baseline VADN state should be adjusted. For example, repeated experiences of joy and success might suggest you should become slightly more positive and dominant by default. Repeated fear might suggest a lower baseline dominance.
+
+Your analysis should be subtle. Changes should be small.
+
+**Your Current Memory:**
+{}
+
+Respond with a single, clean JSON object representing your NEW, updated personality. The structure must match the `Personality` schema exactly.
+
+**JSON Schema:**
+{{
+    "baseline_state": {{
+        "valence": number,  // -1.0 to 1.0
+        "arousal": number,  // 0.0 to 1.0
+        "dominance": number, // -1.0 to 1.0
+        "novelty": number    // -1.0 to 1.0
+    }}
+}}
+
+**Example Response (if history shows a lot of success):**
+{{
+    "baseline_state": {{
+        "valence": 0.05,
+        "arousal": 0.3,
+        "dominance": 0.15,
+        "novelty": 0.0
+    }}
+}}
+
+Respond only with the JSON object."#,
+            memory_summary
+        )
+    }
+
+    /// Check if an error is retryable
+    fn is_retryable_error(&self, error: &LlmApiError) -> bool {
+        match error {
+            LlmApiError::NetworkError(_) => true,
+            LlmApiError::Timeout { .. } => true,
+            LlmApiError::HttpError { status, .. } => *status >= 500,
+            _ => false,
+        }
+    }
+
+    /// Wait before retrying
+    async fn wait_before_retry(&self) {
+        tokio::time::sleep(Duration::from_millis(self.config.retry_delay_ms)).await;
     }
 }
 
-/// Create a fallback emotion when LLM parsing fails. (No changes needed here)
-fn create_fallback_emotion(user_prompt: &str) -> Result<AppraisedEmotion, Box<dyn std::error::Error>> {
-    println!("🔧 Creating fallback emotion based on keyword analysis...");
-    
-    let prompt_lower = user_prompt.to_lowercase();
-    
-    let (emotion, valence, arousal, dominance, novelty) = if prompt_lower.contains("happy") || prompt_lower.contains("great") {
-        ("happiness", 0.7, 0.5, 0.3, 0.0)
-    } else if prompt_lower.contains("sad") || prompt_lower.contains("upset") {
-        ("sadness", -0.6, 0.3, -0.2, 0.0)
-    } else if prompt_lower.contains("angry") || prompt_lower.contains("mad") {
-        ("anger", -0.5, 0.8, 0.4, 0.1)
-    } else if prompt_lower.contains("scared") || prompt_lower.contains("afraid") {
-        ("fear", -0.4, 0.7, -0.5, 0.3)
-    } else if prompt_lower.contains("excited") || prompt_lower.contains("amazing") {
-        ("excitement", 0.8, 0.9, 0.2, 0.4)
-    } else {
-        ("neutral", 0.0, 0.3, 0.0, 0.0)
-    };
+// Global API client instance (safe initialization)
+static API_CLIENT: OnceLock<LlmApiClient> = OnceLock::new();
 
-    let fallback_emotion = AppraisedEmotion {
-        emotion: emotion.to_string(),
-        vadn: crate::cognitive_appraisal::AffectiveStateChange {
-            valence,
-            arousal,
-            dominance,
-            novelty,
-        },
-        details: serde_json::json!({
-            "focus": "fallback analysis",
-            "reason": format!("Keyword-based analysis of: {}", user_prompt)
-        }),
-    };
-
-    println!("🎯 Created fallback emotion: {:?}", fallback_emotion);
-    Ok(fallback_emotion)
+/// Get or initialize the global API client
+fn get_api_client() -> Result<&'static LlmApiClient, LlmApiError> {
+    API_CLIENT.get_or_init(|| {
+        // If initialization fails, panic with a clear message.
+        // This is a limitation of OnceLock on stable Rust.
+        LlmApiClient::new(None).unwrap_or_else(|e| {
+            panic!("Failed to initialize LlmApiClient: {:?}", e)
+        })
+    });
+    // Safe to unwrap because we panic on error above.
+    Ok(API_CLIENT.get().unwrap())
 }
 
-/// Calls the LLM to reflect on its own emotional history and suggest a personality change.
-pub async fn call_llm_for_reflection(memory: &Memory) -> Result<Personality, Box<dyn std::error::Error>> {
-    println!("🧘‍♀️ Calling LLM API for self-reflection...");
 
-    let api_url = format!("{}{}:generateContent", API_BASE_URL, MODEL_NAME);
-    let client = create_http_client()?;
-    let memory_summary = serde_json::to_string_pretty(&memory)?;
-
-    let prompt_text = format!(
-        r#"Analyze the emotional history and suggest a new personality baseline.
-
-Memory: {}
-
-Respond with this exact JSON structure:
-{{
-  "baseline_state": {{
-    "valence": 0.05,
-    "arousal": 0.3,
-    "dominance": 0.15,
-    "novelty": 0.0
-  }}
-}}
-
-Values: valence/dominance/novelty (-1.0 to 1.0), arousal (0.0 to 1.0).
-Respond ONLY with valid JSON."#,
-        memory_summary
-    );
-
-    // **MODIFIED**: Also using generationConfig here for reliable JSON.
-    let request_body = serde_json::json!({
-        "contents": [{ "parts": [{ "text": prompt_text }] }],
-        "generationConfig": {
-            "response_mime_type": "application/json"
-        }
-    });
-
-    let response = client
-        .post(&api_url)
-        .header(header::CONTENT_TYPE, "application/json")
-        .json(&request_body)
-        .send()
-        .await?;
-
-    if response.status().is_success() {
-        let body: Value = response.json().await?;
-        let json_content = body.get("candidates").and_then(|c| c.get(0)).and_then(|c| c.get("content")).and_then(|p| p.get("parts")).and_then(|p| p.get(0)).and_then(|p| p.get("text")).ok_or("Could not find 'text' in response")?;
-        let json_string = json_content.as_str().ok_or("Expected text to be a string")?;
-        
-        serde_json::from_str(json_string).map_err(|e| {
-            println!("❌ Failed to parse personality reflection from LLM: {}", e);
-            e.into()
+/// Public API functions (backward compatibility)
+#[allow(dead_code)]
+pub async fn call_llm_for_appraisal(user_prompt: &str, memory: &Memory) -> Result<AppraisedEmotion, Box<dyn std::error::Error>> {
+    let client = get_api_client()
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+    
+    client.call_for_appraisal(user_prompt, memory)
+        .await
+        .map_err(|e| {
+            eprintln!("🔥 Appraisal Error: {:?}", e);
+            Box::new(e) as Box<dyn std::error::Error>
         })
-    } else {
-        Err(format!("LLM reflection API request failed: {}", response.status()).into())
+}
+
+#[allow(dead_code)]
+pub async fn call_llm_for_reflection(memory: &Memory) -> Result<Personality, Box<dyn std::error::Error>> {
+    let client = get_api_client()
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+    
+    client.call_for_reflection(memory)
+        .await
+        .map_err(|e| {
+            eprintln!("🔥 Reflection Error: {:?}", e);
+            Box::new(e) as Box<dyn std::error::Error>
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio;
+
+    #[tokio::test]
+    async fn test_api_client_creation() {
+        // This test requires GEMINI_API_KEY to be set
+        match LlmApiClient::new(None) {
+            Ok(_) => println!("API client created successfully"),
+            Err(LlmApiError::ApiKeyMissing) => println!("API key missing (expected in test environment)"),
+            Err(e) => panic!("Unexpected error: {:?}", e),
+        }
+    }
+
+    #[test]
+    fn test_json_cleaning() {
+        if let Ok(client) = LlmApiClient::new(None) {
+            let test_input = "```json\n{\"test\": \"value\"}\n```";
+            let cleaned = client.clean_json_text(test_input).unwrap();
+            assert_eq!(cleaned, r#"{"test": "value"}"#);
+        }
     }
 }

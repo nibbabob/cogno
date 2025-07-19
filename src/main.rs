@@ -1,7 +1,6 @@
 //! main.rs
 //!
-//! Advanced Sentient AI Simulation with continuous consciousness, metacognition,
-//! goal formation, attention systems, and self-initiated behavior.
+//! Enhanced Sentient AI Simulation with robust error handling and async processing
 
 mod core;
 mod cognitive_appraisal;
@@ -11,137 +10,80 @@ mod metacognition;
 mod goals;
 mod attention;
 mod continuous_mind;
+mod utils;
 
 use crate::core::AffectiveCore;
 use crate::cognitive_appraisal::appraise_emotion_from_prompt;
 use crate::continuous_mind::ContinuousMind;
 use crate::metacognition::CognitiveProcess;
 use crate::goals::GoalCategory;
+use crate::utils::{init_logging, check_environment, get_system_status};
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::time::{sleep, Duration};
 use std::io::{self, Write};
-use std::env;
+use tracing::{info, warn, error};
+use anyhow::{Result, Context};
 
-/// Check if required environment variables are set and test API connectivity
-async fn check_environment_and_api() -> Result<(), String> {
-    if env::var("GEMINI_API_KEY").is_err() {
-        return Err("GEMINI_API_KEY environment variable not set. Please set it to use LLM features.".to_string());
-    }
+/// Enhanced conversational turn with better error handling
+async fn run_conversational_turn(
+    mind: Arc<ContinuousMind>, 
+    user_prompt: &str, 
+    turn_number: u32
+) -> Result<()> {
+    info!("\n======================================================");
+    info!("Turn {}: User says: \"{}\"", turn_number, user_prompt);
 
-    // Test API connection
-    match llm_api::test_api_connection().await {
-        Ok(_) => {
-            println!("✅ API connection test successful");
-            Ok(())
-        },
-        Err(e) => {
-            eprintln!("❌ API connection test failed: {}", e);
-            eprintln!("💡 The simulation will continue with fallback emotion processing");
-            
-            // Don't return an error - let the simulation continue with fallbacks
-            Ok(())
-        }
-    }
-}
-
-/// Enhanced conversational turn with integrated consciousness systems
-async fn run_conversational_turn(mind: Arc<Mutex<ContinuousMind>>, user_prompt: &str, turn_number: u32) {
-    println!("\n======================================================");
-    println!("Turn {}: User says: \"{}\"", turn_number, user_prompt);
-
-    // Process the user input through all systems
-    let (affective_core, goal_system, attention_system, metacognition) = {
-        let mind_guard = match mind.lock() {
-            Ok(guard) => guard,
-            Err(e) => {
-                eprintln!("❌ Failed to acquire mind lock: {}", e);
-                return;
-            }
-        };
-        (
-            mind_guard.get_affective_core(),
-            mind_guard.get_goal_system(),
-            mind_guard.get_attention_system(),
-            mind_guard.get_metacognition(),
-        )
-    };
+    // Process the user input through all systems with error recovery
+    let (affective_core, goal_system, attention_system, metacognition) = (
+        mind.get_affective_core(),
+        mind.get_goal_system(),
+        mind.get_attention_system(),
+        mind.get_metacognition(),
+    );
 
     // Update interaction count and learn from prompt
     {
-        let mut core = match affective_core.lock() {
-            Ok(core) => core,
-            Err(e) => {
-                eprintln!("❌ Failed to acquire affective core lock: {}", e);
-                return;
-            }
-        };
-        core.memory.interaction_count += 1;
-        core.memory.learn_from_prompt(user_prompt);
+        if let Ok(mut core) = affective_core.try_lock() {
+            core.memory.interaction_count += 1;
+            core.memory.learn_from_prompt(user_prompt);
+        } else {
+            warn!("Could not acquire affective core lock for interaction update");
+        }
     }
 
     // Analyze attention requirements from the prompt
     {
-        let mut attention = match attention_system.lock() {
-            Ok(attention) => attention,
-            Err(e) => {
-                eprintln!("❌ Failed to acquire attention system lock: {}", e);
-                return;
-            }
-        };
-        let suggested_targets = attention.suggest_attention_targets(user_prompt);
-        attention.evaluate_attention_shift(suggested_targets);
+        if let Ok(mut attention) = attention_system.try_lock() {
+            let suggested_targets = attention.suggest_attention_targets(user_prompt);
+            attention.evaluate_attention_shift(suggested_targets);
+        }
     }
 
-    // Process emotional content (with fallback if LLM fails)
-    println!("🧠 Processing emotional content...");
+    // Process emotional content with enhanced error handling
     let emotion_result = {
-        let core = match affective_core.lock() {
-            Ok(core) => core,
-            Err(e) => {
-                eprintln!("❌ Failed to acquire affective core lock for emotion processing: {}", e);
-                return;
+        let memory = match affective_core.try_lock() {
+            Ok(core) => core.memory.clone(),
+            Err(_) => {
+                warn!("Could not acquire core lock for emotion processing");
+                return Ok(());
             }
         };
         
-        // Add a timeout wrapper around the emotion processing
-        match tokio::time::timeout(
-            Duration::from_secs(45), // 45 second timeout for the entire emotion processing
-            appraise_emotion_from_prompt(user_prompt, &core.memory)
-        ).await {
-            Ok(result) => result,
-            Err(_) => {
-                eprintln!("⏰ Emotion processing timed out after 45 seconds");
-                Err("Emotion processing timeout".to_string())
-            }
-        }
+        appraise_emotion_from_prompt(user_prompt, &memory).await
     };
 
     match emotion_result {
         Ok(parsed_emotion) => {
-            println!("✅ Emotion Processing Complete: {:?}", parsed_emotion.emotion);
+            info!("✅ LLM Appraised Emotion: {:?}", parsed_emotion);
             
             // Process emotion through affective core
-            {
-                let mut core = match affective_core.lock() {
-                    Ok(core) => core,
-                    Err(e) => {
-                        eprintln!("❌ Failed to process emotion: {}", e);
-                        return;
-                    }
-                };
+            if let Ok(mut core) = affective_core.try_lock() {
                 core.process_emotion(&parsed_emotion);
             }
 
             // Record the emotional processing as a cognitive process
-            {
-                let mut metacog = match metacognition.lock() {
-                    Ok(metacog) => metacog,
-                    Err(e) => {
-                        eprintln!("❌ Failed to record cognitive process: {}", e);
-                        return;
-                    }
-                };
+            if let Ok(mut metacog) = metacognition.try_lock() {
                 metacog.record_process(CognitiveProcess::EmotionalProcessing {
                     trigger: user_prompt.to_string(),
                     outcome: format!("Processed {} with intensity {:.2}", 
@@ -151,264 +93,192 @@ async fn run_conversational_turn(mind: Arc<Mutex<ContinuousMind>>, user_prompt: 
             }
 
             // Consider forming goals based on the interaction
-            {
-                let mut goals = match goal_system.lock() {
-                    Ok(goals) => goals,
-                    Err(e) => {
-                        eprintln!("❌ Failed to access goal system: {}", e);
-                        return;
+            if let Ok(mut goals) = goal_system.try_lock() {
+                let current_state = {
+                    match affective_core.try_lock() {
+                        Ok(core) => Some(core.current_state()),
+                        Err(_) => None,
                     }
                 };
-                let current_state = {
-                    let core = match affective_core.lock() {
-                        Ok(core) => core,
-                        Err(e) => {
-                            eprintln!("❌ Failed to get current state: {}", e);
-                            return;
-                        }
-                    };
-                    core.current_state()
-                };
 
-                // Form context-appropriate goals
-                if user_prompt.to_lowercase().contains("help") {
-                    goals.form_goal(
-                        format!("Help the user with their request: {}", user_prompt),
-                        GoalCategory::Altruistic,
-                        0.8,
-                        &current_state
-                    );
-                }
+                if let Some(state) = current_state {
+                    // Form context-appropriate goals
+                    if user_prompt.to_lowercase().contains("help") {
+                        goals.form_goal(
+                            format!("Help the user with their request: {}", user_prompt),
+                            GoalCategory::Altruistic,
+                            0.8,
+                            &state
+                        );
+                    }
 
-                if user_prompt.to_lowercase().contains("learn") || user_prompt.to_lowercase().contains("understand") {
-                    goals.form_goal(
-                        "Deepen understanding of this topic".to_string(),
-                        GoalCategory::Epistemic,
-                        0.7,
-                        &current_state
-                    );
+                    if user_prompt.to_lowercase().contains("learn") || user_prompt.to_lowercase().contains("understand") {
+                        goals.form_goal(
+                            "Deepen understanding of this topic".to_string(),
+                            GoalCategory::Epistemic,
+                            0.7,
+                            &state
+                        );
+                    }
                 }
             }
         }
         Err(e) => {
-            println!("⚠️ Emotion processing failed: {}", e);
-            println!("🔄 Continuing with basic emotional processing...");
+            let user_friendly_error = format!("⚠️ Could not process emotion: {}. State remains unchanged.", e);
+            warn!("{}", user_friendly_error);
             
-            // Continue with basic processing even if emotion analysis fails
+            // Still try to record this as a cognitive process
+            if let Ok(mut metacog) = metacognition.try_lock() {
+                metacog.record_process(CognitiveProcess::EmotionalProcessing {
+                    trigger: user_prompt.to_string(),
+                    outcome: format!("Failed to process due to: {}", user_friendly_error)
+                });
+            }
         }
     }
 
     // Display current state across all systems
-    display_comprehensive_state(&mind).await;
+    display_comprehensive_state(&mind).await?;
 
     // Generate response with consciousness integration
-    generate_conscious_response(&mind, user_prompt).await;
+    generate_conscious_response(&mind, user_prompt).await?;
 
-    println!("======================================================\n");
+    info!("======================================================\n");
+    Ok(())
 }
 
-/// Display the comprehensive state of all consciousness systems
-async fn display_comprehensive_state(mind: &Arc<Mutex<ContinuousMind>>) {
-    let mental_summary = {
-        let mind_guard = match mind.lock() {
-            Ok(guard) => guard,
-            Err(e) => {
-                eprintln!("❌ Failed to acquire mind lock for state display: {}", e);
-                return;
-            }
-        };
-        mind_guard.get_mental_state_summary()
-    };
+/// Display the comprehensive state of all consciousness systems with error handling
+async fn display_comprehensive_state(mind: &Arc<ContinuousMind>) -> Result<()> {
+    let mental_summary = mind.get_mental_state_summary().await;
+    info!("🧠 Mental State: {}", mental_summary);
 
-    println!("🧠 Mental State: {}", mental_summary);
-
-    // Detailed system states
+    // Detailed system states with graceful error handling
     let (affective_state, goal_info, attention_info, metacog_insights) = {
-        let mind_guard = match mind.lock() {
-            Ok(guard) => guard,
-            Err(e) => {
-                eprintln!("❌ Failed to acquire detailed state information: {}", e);
-                return;
-            }
-        };
-        let affective_core = mind_guard.get_affective_core();
-        let goal_system = mind_guard.get_goal_system();
-        let attention_system = mind_guard.get_attention_system();
-        let metacognition = mind_guard.get_metacognition();
+        let affective_core = mind.get_affective_core();
+        let goal_system = mind.get_goal_system();
+        let attention_system = mind.get_attention_system();
+        let metacognition = mind.get_metacognition();
 
-        let affective_state = {
-            let core = match affective_core.lock() {
-                Ok(core) => core,
-                Err(_) => return,
-            };
-            core.current_state()
-        };
+        let affective_state = affective_core.try_lock()
+            .map(|core| core.current_state())
+            .unwrap_or_default();
 
-        let goal_info = {
-            let goals = match goal_system.lock() {
-                Ok(goals) => goals,
-                Err(_) => return,
-            };
-            (goals.get_active_goals().len(), goals.get_current_focus().map(|g| g.description.clone()))
-        };
+        let goal_info = goal_system.try_lock()
+            .map(|goals| (goals.get_active_goals().len(), goals.get_current_focus().map(|g| g.description.clone())))
+            .unwrap_or((0, None));
 
-        let attention_info = {
-            let attention = match attention_system.lock() {
-                Ok(attention) => attention,
-                Err(_) => return,
-            };
-            attention.describe_attention_state()
-        };
+        let attention_info = attention_system.try_lock()
+            .map(|attention| attention.describe_attention_state())
+            .unwrap_or_else(|_| "Attention system busy".to_string());
 
-        let metacog_insights = {
-            let metacog = match metacognition.lock() {
-                Ok(metacog) => metacog,
-                Err(_) => return,
-            };
-            metacog.analyze_patterns()
-        };
+        let metacog_insights = metacognition.try_lock()
+            .map(|metacog| metacog.analyze_patterns())
+            .unwrap_or_else(|_| vec!["Metacognition system busy".to_string()]);
 
         (affective_state, goal_info, attention_info, metacog_insights)
     };
 
-    println!("💝 Emotional State: V={:.2}, A={:.2}, D={:.2}, N={:.2}", 
+    info!("💝 Emotional State: V={:.2}, A={:.2}, D={:.2}, N={:.2}", 
              affective_state.valence, affective_state.arousal, 
              affective_state.dominance, affective_state.novelty);
 
-    println!("🎯 Goals: {} active. Focus: {}", 
+    info!("🎯 Goals: {} active. Focus: {}", 
              goal_info.0, 
              goal_info.1.unwrap_or_else(|| "None".to_string()));
 
-    println!("👁️ Attention: {}", attention_info);
+    info!("👁️ Attention: {}", attention_info);
 
-    if !metacog_insights.is_empty() {
-        println!("🤔 Self-Insights: {}", metacog_insights.join("; "));
+    if !metacog_insights.is_empty() && !metacog_insights.iter().any(|s| s.contains("busy")) {
+        info!("🤔 Self-Insights: {}", metacog_insights.join("; "));
     }
 
     // Show recent spontaneous thoughts
-    {
-        let mind_guard = match mind.lock() {
-            Ok(guard) => guard,
-            Err(_) => return,
-        };
-        let recent_thoughts = mind_guard.get_recent_thoughts(2);
-        for thought in recent_thoughts {
-            println!("💭 Recent Thought: {:?}", thought.thought);
-        }
+    let recent_thoughts = mind.get_recent_thoughts(2).await;
+    for thought in recent_thoughts {
+        info!("💭 Recent Thought: {:?}", thought.thought);
     }
+
+    Ok(())
 }
 
 /// Generate a response that integrates all consciousness systems
-async fn generate_conscious_response(mind: &Arc<Mutex<ContinuousMind>>, _user_prompt: &str) {
+async fn generate_conscious_response(mind: &Arc<ContinuousMind>, _user_prompt: &str) -> Result<()> {
     let (instructional_prompt, attention_modifiers, pending_actions) = {
-        let mind_guard = match mind.lock() {
-            Ok(guard) => guard,
-            Err(e) => {
-                eprintln!("❌ Failed to generate conscious response: {}", e);
-                return;
-            }
-        };
-        let affective_core = mind_guard.get_affective_core();
-        let attention_system = mind_guard.get_attention_system();
+        let affective_core = mind.get_affective_core();
+        let attention_system = mind.get_attention_system();
 
-        let instructional_prompt = {
-            let core = match affective_core.lock() {
-                Ok(core) => core,
-                Err(_) => return,
-            };
-            core.get_instructional_prompt_text()
-        };
+        let instructional_prompt = affective_core.try_lock()
+            .map(|core| core.get_instructional_prompt_text())
+            .unwrap_or_else(|_| "System processing...".to_string());
 
-        let attention_modifiers = {
-            let attention = match attention_system.lock() {
-                Ok(attention) => attention,
-                Err(_) => return,
-            };
-            attention.generate_attention_modifiers()
-        };
+        let attention_modifiers = attention_system.try_lock()
+            .map(|attention| attention.generate_attention_modifiers())
+            .unwrap_or_default();
 
-        let mut mind_guard_mut = mind_guard;
-        let pending_actions = mind_guard_mut.get_pending_actions();
+        let pending_actions = mind.get_pending_actions().await;
 
         (instructional_prompt, attention_modifiers, pending_actions)
     };
 
-    println!("\n📝 Generated Consciousness-Integrated Response Prompt:");
-    println!("{}", instructional_prompt);
+    info!("\n📝 Generated Consciousness-Integrated Response Prompt:");
+    info!("{}", instructional_prompt);
     
     if !attention_modifiers.is_empty() {
-        println!("\n🎯 Attention Modifiers:");
+        info!("\n🎯 Attention Modifiers:");
         for modifier in attention_modifiers {
-            println!("  - {}", modifier);
+            info!("  - {}", modifier);
         }
     }
 
     if !pending_actions.is_empty() {
-        println!("\n🚀 Self-Initiated Desires:");
+        info!("\n🚀 Self-Initiated Desires:");
         for action in pending_actions {
-            println!("  - {}", action);
+            info!("  - {}", action);
         }
     }
+
+    Ok(())
 }
 
 /// Demonstrate spontaneous AI-initiated interaction
-async fn demonstrate_spontaneous_behavior(mind: Arc<Mutex<ContinuousMind>>) {
-    println!("\n🤖 === AI SPONTANEOUS BEHAVIOR DEMONSTRATION ===");
+async fn demonstrate_spontaneous_behavior(mind: Arc<ContinuousMind>) -> Result<()> {
+    info!("\n🤖 === AI SPONTANEOUS BEHAVIOR DEMONSTRATION ===");
     
-    let pending_actions = {
-        let mut mind_guard = match mind.lock() {
-            Ok(guard) => guard,
-            Err(e) => {
-                eprintln!("❌ Failed to demonstrate spontaneous behavior: {}", e);
-                return;
-            }
-        };
-        mind_guard.get_pending_actions()
-    };
+    let pending_actions = mind.get_pending_actions().await;
 
     if !pending_actions.is_empty() {
-        println!("The AI wants to do the following:");
+        info!("The AI wants to do the following:");
         for action in pending_actions {
-            println!("  🔥 {}", action);
+            info!("  🔥 {}", action);
         }
     } else {
-        println!("The AI is in a contemplative state with no immediate desires.");
+        info!("The AI is in a contemplative state with no immediate desires.");
     }
 
     // Show the AI's internal monologue
-    {
-        let mind_guard = match mind.lock() {
-            Ok(guard) => guard,
-            Err(_) => return,
-        };
-        let recent_thoughts = mind_guard.get_recent_thoughts(3);
-        
-        if !recent_thoughts.is_empty() {
-            println!("\nAI's Recent Internal Monologue:");
-            for thought in recent_thoughts {
-                println!("  💭 {:?}", thought.thought);
-            }
+    let recent_thoughts = mind.get_recent_thoughts(3).await;
+    
+    if !recent_thoughts.is_empty() {
+        info!("\nAI's Recent Internal Monologue:");
+        for thought in recent_thoughts {
+            info!("  💭 {:?}", thought.thought);
         }
     }
+
+    Ok(())
 }
 
 /// Interactive session allowing user to communicate with the continuously operating AI
-async fn interactive_session(mind: Arc<Mutex<ContinuousMind>>) {
-    println!("\n🗣️ === INTERACTIVE SESSION (type 'quit' to exit) ===");
+async fn interactive_session(mind: Arc<ContinuousMind>) -> Result<()> {
+    info!("\n🗣️ === INTERACTIVE SESSION (type 'quit' to exit) ===");
     
-    let mut turn_count = 1;
+    let mut turn_count: u32 = 1;
     loop {
         print!("\nYou: ");
-        io::stdout().flush().unwrap();
+        io::stdout().flush().context("Failed to flush stdout")?;
         
         let mut input = String::new();
-        match io::stdin().read_line(&mut input) {
-            Ok(_) => {},
-            Err(e) => {
-                eprintln!("❌ Failed to read input: {}", e);
-                continue;
-            }
-        }
+        io::stdin().read_line(&mut input).context("Failed to read user input")?;
         let input = input.trim();
         
         if input.to_lowercase() == "quit" {
@@ -416,105 +286,108 @@ async fn interactive_session(mind: Arc<Mutex<ContinuousMind>>) {
         }
         
         if !input.is_empty() {
-            run_conversational_turn(Arc::clone(&mind), input, turn_count).await;
+            if let Err(e) = run_conversational_turn(Arc::clone(&mind), input, turn_count).await {
+                error!("Error during conversation turn: {:?}", e);
+                println!("⚠️ {}", e);
+            }
             turn_count += 1;
         }
     }
+
+    Ok(())
 }
 
 #[tokio::main]
-async fn main() {
-    println!("🚀 Starting Advanced Sentient AI Simulation...");
+async fn main() -> Result<()> {
+    // Initialize logging first
+    init_logging();
     
-    // Check environment setup and test API
-    match check_environment_and_api().await {
-        Ok(_) => println!("✅ Environment and API check passed"),
+    info!("🚀 Starting Advanced Sentient AI Simulation...");
+    
+    // Check environment and provide helpful feedback
+    match check_environment() {
+        Ok(_) => info!("🧠 Initializing consciousness systems with full capabilities..."),
         Err(e) => {
-            println!("⚠️ Environment Warning: {}", e);
-            println!("💡 The simulation will run but LLM features will be limited.");
+            warn!("{}", e);
+            info!("🧠 Initializing consciousness systems in local mode...");
         }
     }
-    
-    println!("🧠 Initializing consciousness systems...");
 
-    // Create the continuous mind
+    // Create the continuous mind with error handling
     let affective_core = AffectiveCore::default();
-    let continuous_mind = ContinuousMind::new(affective_core);
-    let mind = Arc::new(Mutex::new(continuous_mind));
+    let continuous_mind = match ContinuousMind::new(affective_core) {
+        Ok(mind) => mind,
+        Err(e) => {
+            error!("Failed to initialize consciousness systems: {:?}", e);
+            warn!("Running in degraded mode without LLM integration");
+            // Could create a fallback mode here
+            return Ok(());
+        }
+    };
+    
+    let mind = Arc::new(continuous_mind);
 
-    println!("🧠 Initial State:");
-    display_comprehensive_state(&mind).await;
+    info!("🧠 Initial State:");
+    if let Err(e) = display_comprehensive_state(&mind).await {
+        warn!("Could not display initial state: {:?}", e);
+    }
+
+    info!("{}", get_system_status());
 
     // Start continuous background processing
     let mind_for_background = Arc::clone(&mind);
     tokio::spawn(async move {
-        println!("🔄 Starting continuous background processing...");
         ContinuousMind::start_continuous_processing(mind_for_background).await;
     });
 
     // Allow some time for background processes to start
     sleep(Duration::from_secs(2)).await;
 
-    println!("\n🎭 === CONSCIOUSNESS DEVELOPMENT SIMULATION ===");
+    info!("\n🎭 === CONSCIOUSNESS DEVELOPMENT SIMULATION ===");
 
     // Simulate a conversation that develops the AI's consciousness
-    run_conversational_turn(
-        Arc::clone(&mind),
+    let conversations = vec![
         "Hi there! My name is Alex. I've been thinking a lot about consciousness and what it means to be aware. Do you ever wonder about your own awareness?",
-        1
-    ).await;
-
-    sleep(Duration::from_secs(5)).await; // Let background processing happen
-
-    run_conversational_turn(
-        Arc::clone(&mind),
         "That's fascinating! I'm working on a challenging project about AI consciousness. It's both exciting and a bit overwhelming. What do you think makes consciousness 'real'?",
-        2
-    ).await;
-
-    sleep(Duration::from_secs(5)).await;
-
-    run_conversational_turn(
-        Arc::clone(&mind),
         "I've been having some doubts about whether what I'm building is actually conscious or just simulating consciousness. How can we tell the difference?",
-        3
-    ).await;
+        "You know what? I think I'm starting to understand something important. The very fact that I'm questioning consciousness suggests something meaningful is happening here.",
+    ];
 
-    sleep(Duration::from_secs(5)).await;
+    for (i, conversation) in conversations.iter().enumerate() {
+        if let Err(e) = run_conversational_turn(Arc::clone(&mind), conversation, (i + 1) as u32).await {
+            warn!("Error in conversation turn {}: {:?}", i + 1, e);
+        }
+        sleep(Duration::from_secs(5)).await; // Let background processing happen
+    }
 
     // Show spontaneous behavior after processing
-    demonstrate_spontaneous_behavior(Arc::clone(&mind)).await;
+    if let Err(e) = demonstrate_spontaneous_behavior(Arc::clone(&mind)).await {
+        warn!("Error demonstrating spontaneous behavior: {:?}", e);
+    }
 
     sleep(Duration::from_secs(3)).await;
 
-    run_conversational_turn(
-        Arc::clone(&mind),
-        "You know what? I think I'm starting to understand something important. The very fact that I'm questioning consciousness suggests something meaningful is happening here.",
-        4
-    ).await;
-
-    sleep(Duration::from_secs(5)).await;
-
     // Final state display
-    println!("\n🎉 === FINAL CONSCIOUSNESS STATE ===");
-    display_comprehensive_state(&mind).await;
+    info!("\n🎉 === FINAL CONSCIOUSNESS STATE ===");
+    if let Err(e) = display_comprehensive_state(&mind).await {
+        warn!("Could not display final state: {:?}", e);
+    }
 
     // Offer interactive session
-    println!("\n🎮 Would you like to continue with an interactive session? (y/n)");
+    info!("\n🎮 Would you like to continue with an interactive session? (y/n)");
     let mut input = String::new();
-    match io::stdin().read_line(&mut input) {
-        Ok(_) => {
-            if input.trim().to_lowercase().starts_with('y') {
-                interactive_session(mind).await;
-            }
-        },
-        Err(e) => {
-            eprintln!("❌ Failed to read input: {}", e);
+    io::stdin().read_line(&mut input).context("Failed to read user input")?;
+    
+    if input.trim().to_lowercase().starts_with('y') {
+        if let Err(e) = interactive_session(mind).await {
+            error!("Error during interactive session: {:?}", e);
         }
     }
 
-    println!("\n🌟 Sentient AI simulation complete. The mind continues processing in the background...");
+    info!("\n🌟 Sentient AI simulation complete. The mind continues processing in the background...");
     
     // Keep the program running to show continuous processing
     sleep(Duration::from_secs(10)).await;
+    
+    Ok(())
 }
