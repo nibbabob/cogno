@@ -27,8 +27,8 @@ use anyhow::{Result, Context};
 
 /// Enhanced conversational turn with comprehensive system integration
 async fn run_conversational_turn(
-    mind: Arc<ContinuousMind>, 
-    user_prompt: &str, 
+    mind: Arc<ContinuousMind>,
+    user_prompt: &str,
     turn_number: u32
 ) -> Result<()> {
     info!("\n======================================================");
@@ -77,16 +77,16 @@ async fn analyze_and_update_attention(mind: &Arc<ContinuousMind>, user_prompt: &
         // Analyze what should capture attention
         let suggested_targets = attention.suggest_attention_targets(user_prompt);
         info!("🎯 Suggested attention targets: {:?}", suggested_targets);
-        
+
         // Evaluate attention shifts
         attention.evaluate_attention_shift(suggested_targets);
-        
+
         // Get current focus state
         if let Some(primary_focus) = attention.get_primary_focus() {
-            info!("👁️ Primary focus: {:?} (intensity: {:.2}, stability: {:.2})", 
+            info!("👁️ Primary focus: {:?} (intensity: {:.2}, stability: {:.2})",
                   primary_focus.target, primary_focus.intensity, primary_focus.stability);
         }
-        
+
         // Analyze background attention
         let background = attention.get_background_attention();
         if !background.is_empty() {
@@ -95,13 +95,13 @@ async fn analyze_and_update_attention(mind: &Arc<ContinuousMind>, user_prompt: &
                 info!("  - {:?}: intensity {:.2}", target, state.intensity);
             }
         }
-        
+
         // Get attention insights
         let patterns = attention.analyze_attention_patterns();
         for pattern in patterns {
             info!("🔍 Attention insight: {}", pattern);
         }
-        
+
         // Generate attention-aware modifiers for response
         let modifiers = attention.generate_attention_modifiers();
         for modifier in &modifiers {
@@ -113,7 +113,7 @@ async fn analyze_and_update_attention(mind: &Arc<ContinuousMind>, user_prompt: &
 
 /// Enhanced emotional processing with comprehensive error handling
 async fn process_emotions_comprehensively(
-    mind: &Arc<ContinuousMind>, 
+    mind: &Arc<ContinuousMind>,
     user_prompt: &str
 ) -> Result<()> {
     let memory = {
@@ -125,26 +125,26 @@ async fn process_emotions_comprehensively(
             }
         }
     };
-    
+
     match appraise_emotion_from_prompt(user_prompt, &memory).await {
         Ok(parsed_emotion) => {
-            info!("✅ LLM Appraised Emotion: {} (V:{:.2}, A:{:.2}, D:{:.2}, N:{:.2})", 
+            info!("✅ LLM Appraised Emotion: {} (V:{:.2}, A:{:.2}, D:{:.2}, N:{:.2})",
                   parsed_emotion.emotion,
                   parsed_emotion.vadn.valence,
-                  parsed_emotion.vadn.arousal, 
-                  parsed_emotion
+                  parsed_emotion.vadn.arousal,
+                  parsed_emotion.vadn.dominance,
                   parsed_emotion.vadn.novelty);
-            
+
             // Process emotion through affective core
             if let Ok(mut core) = mind.get_affective_core().try_lock() {
                 let old_state = core.current_state();
                 core.process_emotion(&parsed_emotion);
                 let new_state = core.current_state();
-                
+
                 info!("🔄 Emotional state change:");
-                info!("  Before: V:{:.2}, A:{:.2}, D:{:.2}, N:{:.2}", 
+                info!("  Before: V:{:.2}, A:{:.2}, D:{:.2}, N:{:.2}",
                       old_state.valence, old_state.arousal, old_state.dominance, old_state.novelty);
-                info!("  After:  V:{:.2}, A:{:.2}, D:{:.2}, N:{:.2}", 
+                info!("  After:  V:{:.2}, A:{:.2}, D:{:.2}, N:{:.2}",
                       new_state.valence, new_state.arousal, new_state.dominance, new_state.novelty);
             }
 
@@ -152,8 +152,8 @@ async fn process_emotions_comprehensively(
             if let Ok(mut metacog) = mind.get_metacognition().try_lock() {
                 metacog.record_process(CognitiveProcess::EmotionalProcessing {
                     trigger: user_prompt.to_string(),
-                    outcome: format!("Successfully processed {} with VADN impact: V{:+.2}, A{:+.2}, D{:+.2}, N{:+.2}", 
-                                   parsed_emotion.emotion, 
+                    outcome: format!("Successfully processed {} with VADN impact: V{:+.2}, A{:+.2}, D{:+.2}, N{:+.2}",
+                                   parsed_emotion.emotion,
                                    parsed_emotion.vadn.valence,
                                    parsed_emotion.vadn.arousal,
                                    parsed_emotion.vadn.dominance,
@@ -165,7 +165,7 @@ async fn process_emotions_comprehensively(
         Err(e) => {
             let formatted_error = format_error_for_user(&e);
             warn!("{}", formatted_error);
-            
+
             // Record failed emotional processing
             if let Ok(mut metacog) = mind.get_metacognition().try_lock() {
                 metacog.record_process(CognitiveProcess::EmotionalProcessing {
@@ -173,7 +173,7 @@ async fn process_emotions_comprehensively(
                     outcome: format!("Failed to process emotion: {}", formatted_error)
                 });
             }
-            
+
             Err(anyhow::anyhow!("Emotional processing failed: {}", e))
         }
     }
@@ -181,8 +181,8 @@ async fn process_emotions_comprehensively(
 
 /// Enhanced goal management with progress tracking and comprehensive features
 async fn manage_goals_comprehensively(
-    mind: &Arc<ContinuousMind>, 
-    user_prompt: &str, 
+    mind: &Arc<ContinuousMind>,
+    user_prompt: &str,
     emotion_success: bool
 ) -> Result<()> {
     if let Ok(mut goals) = mind.get_goal_system().try_lock() {
@@ -196,7 +196,7 @@ async fn manage_goals_comprehensively(
         if let Some(state) = current_state {
             // Analyze prompt for goal formation opportunities
             let mut goals_formed = Vec::new();
-            
+
             if user_prompt.to_lowercase().contains("help") {
                 if let Some(goal_id) = goals.form_goal(
                     format!("Help the user with: {}", user_prompt),
@@ -235,13 +235,13 @@ async fn manage_goals_comprehensively(
                 let active_goals = goals.get_active_goals();
                 active_goals.iter().map(|g| g.id.clone()).collect()
             };
-            
+
             for goal_id in active_goal_ids {
                 let progress_delta = if emotion_success { 0.1 } else { 0.05 };
                 goals.update_goal_progress(
-                    &goal_id, 
-                    progress_delta, 
-                    Some(format!("Interaction turn completed with user input: '{}'", 
+                    &goal_id,
+                    progress_delta,
+                    Some(format!("Interaction turn completed with user input: '{}'",
                                user_prompt.chars().take(50).collect::<String>()))
                 );
             }
@@ -249,16 +249,16 @@ async fn manage_goals_comprehensively(
             // Determine and update focus
             if let Some(focus_id) = goals.determine_focus() {
                 if let Some(focused_goal) = goals.get_active_goals().iter().find(|g| g.id == focus_id) {
-                    info!("🎯 Current goal focus: {} (priority: {:.2}, progress: {:.1}%)", 
-                          focused_goal.description, 
-                          focused_goal.priority, 
+                    info!("🎯 Current goal focus: {} (priority: {:.2}, progress: {:.1}%)",
+                          focused_goal.description,
+                          focused_goal.priority,
                           focused_goal.progress * 100.0);
                 }
             }
 
             // Show comprehensive goal state
             info!("📊 Goal System Summary: {}", goals.generate_summary());
-            
+
             // Generate and log desired actions
             let desired_actions = goals.generate_desired_actions();
             if !desired_actions.is_empty() {
@@ -285,10 +285,10 @@ async fn perform_metacognitive_analysis(mind: &Arc<ContinuousMind>, user_prompt:
         // Check if deep reflection is needed and get state info
         let should_reflect = metacog.should_deep_reflect();
         let reasoning_confidence = metacog.state.reasoning_confidence;
-        
+
         if should_reflect {
             info!("🤔 Metacognitive system suggests deep reflection is needed");
-            
+
             metacog.record_process(CognitiveProcess::SelfReflection {
                 insight: "Recognized need for deeper self-analysis based on cognitive load and confidence levels".to_string(),
                 confidence: reasoning_confidence
@@ -307,7 +307,7 @@ async fn perform_metacognitive_analysis(mind: &Arc<ContinuousMind>, user_prompt:
         // Generate self-narrative
         let narrative = metacog.generate_self_narrative();
         info!("📖 Self-awareness narrative: {}", narrative);
-        
+
         // Show detailed cognitive state
         info!("🔬 Cognitive state details:");
         info!("  - Self-awareness: {:.1}%", metacog.state.self_awareness_level * 100.0);
@@ -328,16 +328,16 @@ async fn display_comprehensive_state(mind: &Arc<ContinuousMind>) -> Result<()> {
     if let Ok(core) = mind.get_affective_core().try_lock() {
         let state = core.current_state();
         let _prompt_text = core.get_instructional_prompt_text();
-        
+
         info!("💝 Detailed Emotional State:");
         info!("  - Valence (pleasure): {:.2}", state.valence);
         info!("  - Arousal (energy): {:.2}", state.arousal);
         info!("  - Dominance (control): {:.2}", state.dominance);
         info!("  - Novelty (surprise): {:.2}", state.novelty);
-        info!("  - Memory: {} interactions, {} milestones", 
-              core.memory.interaction_count, 
+        info!("  - Memory: {} interactions, {} milestones",
+              core.memory.interaction_count,
               core.memory.emotional_milestones.len());
-        
+
         if let Some(name) = &core.memory.user_profile.name {
             info!("  - User name remembered: {}", name);
         }
@@ -348,12 +348,12 @@ async fn display_comprehensive_state(mind: &Arc<ContinuousMind>) -> Result<()> {
         let active_goals = goals.get_active_goals();
         info!("🎯 Goal System Details:");
         info!("  - Active goals: {}", active_goals.len());
-        
+
         for goal in active_goals.iter().take(3) {
-            info!("    * {} ({:.1}% complete, priority: {:.2})", 
+            info!("    * {} ({:.1}% complete, priority: {:.2})",
                   goal.description, goal.progress * 100.0, goal.priority);
         }
-        
+
         if let Some(focused_goal) = goals.get_current_focus() {
             info!("  - Current focus: {}", focused_goal.description);
             info!("    - Importance score: {:.2}", focused_goal.calculate_importance());
@@ -361,17 +361,17 @@ async fn display_comprehensive_state(mind: &Arc<ContinuousMind>) -> Result<()> {
         }
     }
 
-    // Detailed attention state  
+    // Detailed attention state
     if let Ok(attention) = mind.get_attention_system().try_lock() {
         info!("👁️ Attention System Details:");
         info!("  - State: {}", attention.describe_attention_state());
-        
+
         if let Some(primary) = attention.get_primary_focus() {
             info!("  - Primary focus: {:?}", primary.target);
-            info!("    - Intensity: {:.2}, Duration: {:.1}min, Stability: {:.2}", 
+            info!("    - Intensity: {:.2}, Duration: {:.1}min, Stability: {:.2}",
                   primary.intensity, primary.duration, primary.stability);
         }
-        
+
         let background = attention.get_background_attention();
         if !background.is_empty() {
             info!("  - Background awareness: {} targets", background.len());
@@ -393,7 +393,7 @@ async fn display_comprehensive_state(mind: &Arc<ContinuousMind>) -> Result<()> {
 /// Enhanced conscious response generation with full system integration
 async fn generate_enhanced_conscious_response(mind: &Arc<ContinuousMind>, user_prompt: &str) -> Result<()> {
     info!("\n📝 === CONSCIOUSNESS-INTEGRATED RESPONSE GENERATION ===");
-    
+
     // Gather comprehensive state information
     let (instructional_prompt, attention_modifiers, pending_actions, goal_context) = {
         let affective_core = mind.get_affective_core();
@@ -409,12 +409,12 @@ async fn generate_enhanced_conscious_response(mind: &Arc<ContinuousMind>, user_p
             .unwrap_or_default();
 
         let pending_actions = mind.get_pending_actions().await;
-        
+
         let goal_context = goal_system.try_lock()
             .map(|goals| {
                 if let Some(focused_goal) = goals.get_current_focus() {
-                    format!("Current goal: {} ({}% complete)", 
-                           focused_goal.description, 
+                    format!("Current goal: {} ({}% complete)",
+                           focused_goal.description,
                            (focused_goal.progress * 100.0) as i32)
                 } else {
                     "No specific goal focus".to_string()
@@ -428,7 +428,7 @@ async fn generate_enhanced_conscious_response(mind: &Arc<ContinuousMind>, user_p
     // Display comprehensive response context
     info!("🧠 Affective State Guidance:");
     info!("{}", instructional_prompt);
-    
+
     if !attention_modifiers.is_empty() {
         info!("\n🎯 Attention-Based Modifiers:");
         for modifier in attention_modifiers {
@@ -449,21 +449,21 @@ async fn generate_enhanced_conscious_response(mind: &Arc<ContinuousMind>, user_p
     if let Ok(mut metacog) = mind.get_metacognition().try_lock() {
         let confidence = metacog.state.reasoning_confidence;
         metacog.record_process(CognitiveProcess::PredictiveThinking {
-            prediction: format!("Response to '{}' will integrate emotional state, attention focus, and current goals", 
+            prediction: format!("Response to '{}' will integrate emotional state, attention focus, and current goals",
                               user_prompt.chars().take(30).collect::<String>()),
             confidence
         });
     }
 
     info!("\n📋 Response should integrate all consciousness dimensions for maximum authenticity.");
-    
+
     Ok(())
 }
 
 /// Enhanced spontaneous behavior demonstration with comprehensive features
 async fn demonstrate_spontaneous_behavior(mind: Arc<ContinuousMind>) -> Result<()> {
     info!("\n🤖 === ENHANCED SPONTANEOUS BEHAVIOR DEMONSTRATION ===");
-    
+
     let pending_actions = mind.get_pending_actions().await;
     let recent_thoughts = mind.get_recent_thoughts(5).await;
 
@@ -479,22 +479,22 @@ async fn demonstrate_spontaneous_behavior(mind: Arc<ContinuousMind>) -> Result<(
     if !recent_thoughts.is_empty() {
         info!("\n💭 AI's Recent Internal Monologue:");
         for thought in recent_thoughts {
-            info!("  - {:?} ({})", 
-                  thought.thought, 
+            info!("  - {:?} ({})",
+                  thought.thought,
                   thought.timestamp.format("%H:%M:%S"));
         }
     }
 
     // Demonstrate system integration by showing how different systems influence each other
     info!("\n🔗 System Integration Analysis:");
-    
+
     if let Ok(goals) = mind.get_goal_system().try_lock() {
         if let Some(focus) = goals.get_current_focus() {
             info!("  📍 Current goal focus is influencing attention and emotional priorities");
             info!("  🎯 Goal: {} (importance: {:.2})", focus.description, focus.calculate_importance());
         }
     }
-    
+
     if let Ok(attention) = mind.get_attention_system().try_lock() {
         let patterns = attention.analyze_attention_patterns();
         for pattern in patterns {
@@ -521,20 +521,20 @@ async fn interactive_session(mind: Arc<ContinuousMind>) -> Result<()> {
     info!("  - 'thoughts' - Show recent thoughts");
     info!("  - 'reflect' - Trigger self-reflection");
     info!("  - 'quit' - Exit");
-    
+
     let mut turn_count: u32 = 1;
     loop {
         print!("\nYou: ");
         io::stdout().flush().context("Failed to flush stdout")?;
-        
+
         let mut input = String::new();
         io::stdin().read_line(&mut input).context("Failed to read user input")?;
         let input = input.trim();
-        
+
         if input.to_lowercase() == "quit" {
             break;
         }
-        
+
         if !input.is_empty() {
             let result = match input.to_lowercase().as_str() {
                 "status" => {
@@ -570,10 +570,8 @@ async fn interactive_session(mind: Arc<ContinuousMind>) -> Result<()> {
                 "reflect" => {
                     if let Ok(mut core) = mind.get_affective_core().try_lock() {
                         info!("🧘‍♀️ Triggering self-reflection...");
-                        match core.reflect().await {
-                            Ok(_) => info!("Reflection completed successfully"),
-                            Err(e) => warn!("Reflection failed: {}", format_error_for_user(&e)),
-                        }
+                        core.reflect().await;
+                        info!("Reflection completed successfully");
                     }
                     Ok(())
                 },
@@ -593,7 +591,7 @@ async fn interactive_session(mind: Arc<ContinuousMind>) -> Result<()> {
                     }
                 }
             };
-            
+
             if let Err(e) = result {
                 error!("Error during interaction: {:?}", e);
                 println!("⚠️ {}", format_error_for_user(&e));
@@ -607,9 +605,9 @@ async fn interactive_session(mind: Arc<ContinuousMind>) -> Result<()> {
 #[tokio::main]
 async fn main() -> Result<()> {
     init_logging();
-    
+
     info!("🚀 Starting Enhanced Sentient AI Simulation...");
-    
+
     match check_environment() {
         Ok(_) => info!("🧠 Initializing consciousness systems with full capabilities..."),
         Err(e) => {
@@ -627,7 +625,7 @@ async fn main() -> Result<()> {
             return Ok(());
         }
     };
-    
+
     let mind = Arc::new(continuous_mind);
 
     info!("🧠 Initial System State:");
@@ -670,14 +668,14 @@ async fn main() -> Result<()> {
     info!("\n🎮 Would you like to continue with an enhanced interactive session? (y/n)");
     let mut input = String::new();
     io::stdin().read_line(&mut input).context("Failed to read user input")?;
-    
+
     if input.trim().to_lowercase().starts_with('y') {
         interactive_session(mind).await?;
     }
 
     info!("\n🌟 Enhanced Sentient AI simulation complete. All consciousness systems fully integrated.");
-    
+
     sleep(Duration::from_secs(5)).await;
-    
+
     Ok(())
 }
